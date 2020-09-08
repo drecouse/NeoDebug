@@ -20,8 +20,8 @@ if !exists('g:neodbg_cmd_prefix')
     let g:neodbg_cmd_prefix='DBG'
 endif
 
-if !exists('g:neodbg_ballonshow_with_print')
-    let g:neodbg_ballonshow_with_print = 0
+if !exists('g:neodbg_useFloatingHover')
+    let g:neodbg_useFloatingHover = 1
 endif
 
 if !exists('g:neodbg_debuginfo')
@@ -381,18 +381,6 @@ function! s:NeoDebugStart(cmd)
 
     " Install debugger commands in the text window.
     call win_gotoid(s:startwin)
-
-    " Enable showing a balloon with eval info
-    if has("balloon_eval") || has("balloon_eval_term")
-        set bexpr=NeoDebugBalloonExpr()
-        if has("balloon_eval")
-            set ballooneval
-            set balloondelay=500
-        endif
-        if has("balloon_eval_term")
-            set balloonevalterm
-        endif
-    endif
 
     augroup NeoDebugAutoCMD
         au BufRead * call s:BufferRead()
@@ -832,64 +820,6 @@ endfunction
 
 function! NeoDebugFoldTextExpr()
     return getline(v:foldstart) . ' ' . substitute(getline(v:foldstart+1), '\v^\s+', '', '') . ' ... (' . (v:foldend-v:foldstart-1) . ' lines)'
-endfunction
-
-" Show a balloon with information of the variable under the mouse pointer,
-" if there is any.
-function! NeoDebugBalloonExpr()
-    if v:beval_winid != s:startwin
-        return
-    endif
-    let s:evalFromBalloonExpr = 1
-    let s:evalFromBalloonExprResult = ''
-    let s:ignoreEvalError = 1
-    call s:SendEval(v:beval_text)
-
-    let output = ch_readraw(s:neodbg_chan)
-    let alloutput = ''
-    while output != g:neodbg_prompt
-        let alloutput .= output
-        let output = ch_readraw(s:neodbg_chan)
-    endw
-
-    let value = substitute(alloutput, '.*value="\(.*\)"', '\1', '')
-    let value = substitute(value, '\\"', '"', 'g')
-    let value = substitute(value, '\\n\s*', '', 'g')
-
-    if s:evalFromBalloonExprResult == ''
-        let s:evalFromBalloonExprResult = s:evalexpr . ': ' . value
-    else
-        let s:evalFromBalloonExprResult .= ' = ' . value
-    endif
-
-    if s:evalexpr[0] != '*' && value =~ '^0x' && value != '0x0' && value !~ '"$'
-        " Looks like a pointer, also display what it points to.
-        let s:ignoreEvalError = 1
-        call s:SendEval('*' . s:evalexpr)
-
-        let output = ch_readraw(s:neodbg_chan)
-        let alloutput = ''
-        while output != g:neodbg_prompt
-            let alloutput .= output
-            let output = ch_readraw(s:neodbg_chan)
-        endw
-
-        let value = substitute(alloutput, '.*value="\(.*\)"', '\1', '')
-        let value = substitute(value, '\\"', '"', 'g')
-        let value = substitute(value, '\\n\s*', '', 'g')
-
-        let s:evalFromBalloonExprResult .= ' ' . value
-
-    endif
-
-    " for neodebug#GotoConsoleWindow to display also
-    if g:neodbg_ballonshow_with_print == 1
-        call NeoDebugSendCommand('p '. v:beval_text)
-        call NeoDebugSendCommand('p '. s:evalexpr)
-    endif
-
-    return s:evalFromBalloonExprResult
-
 endfunction
 
 function! NeoDebugExprEval(expr)
@@ -1339,6 +1269,7 @@ endfunction
 function! NeoDebugEvaluate(range, arg)
     if a:arg != ''
         let expr = a:arg
+        let s:evalFromBalloonExpr = 0
     elseif a:range == 2
         let pos = getcurpos()
         let reg = getreg('v', 1, 1)
@@ -1347,8 +1278,10 @@ function! NeoDebugEvaluate(range, arg)
         let expr = @v
         call setpos('.', pos)
         call setreg('v', reg, regt)
+        let s:evalFromBalloonExpr = 1
     else
         let expr = expand('<cexpr>')
+        let s:evalFromBalloonExpr = 1
     endif
     let s:ignoreEvalError = 0
     call s:SendEval(expr)
@@ -1356,22 +1289,155 @@ endfunction
 
 let s:ignoreEvalError = 0
 let s:evalFromBalloonExpr = 0
+let s:evalFromBalloonExprResult = ''
 
 " Handle the result of data-evaluate-expression
 function! s:HandleEvaluate(msg)
-    " echomsg "HandleEvaluate:".a:msg
     let value = substitute(a:msg, '.*value="\(.*\)"', '\1', '')
     let value = substitute(value, '\\"', '"', 'g')
+    let value = substitute(value, '', '\1', '')
+    if s:evalFromBalloonExpr
+        if s:evalFromBalloonExprResult == ''
+        let s:evalFromBalloonExprResult = s:evalexpr . ': ' . value
+        else
+        let s:evalFromBalloonExprResult .= ' = ' . value
+        endif
+        let s:evalFromBalloonExprResult = split(s:evalFromBalloonExprResult, '\\n')
+        call s:OpenHoverPreview(s:evalFromBalloonExprResult, v:null)
+        let s:evalFromBalloonExprResult = ''
+    else
+        echomsg '"' . s:evalexpr . '": ' . value
+    endif
 
     if s:evalexpr[0] != '*' && value =~ '^0x' && value != '0x0' && value !~ '"$'
         " Looks like a pointer, also display what it points to.
         let s:ignoreEvalError = 1
         call s:SendEval('*' . s:evalexpr)
     else
-        let s:evalFromBalloonExpr = 0
+        let s:evalFromBalloonExprResult = ''
     endif
 endfunction
 
+function! s:ShouldUseFloatWindow() abort
+    if exists('*nvim_open_win') && (get(g:, 'neodbg_useFloatingHover', 1) == 1)
+        return v:true
+    else
+        return v:false
+    endif
+endfunction
+
+function! s:CloseFloatingHoverOnCursorMove(win_id, opened) abort
+    if getpos('.') == a:opened
+        " Just after opening floating window, CursorMoved event is run.
+        " To avoid closing floating window immediately, check the cursor
+        " was really moved
+        return
+    endif
+    autocmd! nvim_termdebug_close_hover
+    let winnr = win_id2win(a:win_id)
+    if winnr == 0
+        return
+    endif
+    call nvim_win_close(a:win_id, v:true)
+endfunction
+
+function! s:CloseFloatingHoverOnBufEnter(win_id, bufnr) abort
+    let winnr = win_id2win(a:win_id)
+    if winnr == 0
+        " Float window was already closed
+        autocmd! nvim_termdebug_close_hover
+        return
+    endif
+    if winnr == winnr()
+        " Cursor is moving into floating window. Do not close it
+        return
+    endif
+    if bufnr('%') == a:bufnr
+        " When current buffer opened hover window, it's not another buffer. Skipped
+        return
+    endif
+    autocmd! nvim_termdebug_close_hover
+    call nvim_win_close(a:win_id, v:true)
+endfunction
+
+" Open preview window. Window is open in:
+"   - Floating window on Neovim (0.4.0 or later)
+"   - Preview window on Neovim (0.3.0 or earlier) or Vim
+function! s:OpenHoverPreview(lines, filetype) abort
+    " Use local variable since parameter is not modifiable
+    let lines = a:lines
+    let bufnr = bufnr('%')
+
+    let use_float_win = s:ShouldUseFloatWindow()
+    if use_float_win
+        let pos = getpos('.')
+
+      " Calculate width and height
+        let width = 0
+        for index in range(len(lines))
+            let line = lines[index]
+            let lw = strdisplaywidth(line)
+            if lw > width
+                let width = lw
+            endif
+            let lines[index] = line
+        endfor
+
+        let height = len(lines)
+
+        " Calculate anchor
+        " Prefer North, but if there is no space, fallback into South
+        let bottom_line = line('w0') + winheight(0) - 1
+        if pos[1] + height <= bottom_line
+            let vert = 'N'
+            let row = 1
+        else
+            let vert = 'S'
+            let row = 0
+        endif
+
+        " Prefer West, but if there is no space, fallback into East
+        if pos[2] + width <= &columns
+            let hor = 'W'
+            let col = 0
+        else
+            let hor = 'E'
+            let col = 1
+        endif
+
+        let buf = nvim_create_buf(v:false, v:true)
+        call nvim_buf_set_lines(buf, 0, -1, v:true, lines)
+        " using v:true for second argument of nvim_open_win make the floating
+        " window disappear
+        let float_win_id = nvim_open_win(buf, v:false, {
+            \   'relative': 'cursor',
+            \   'anchor': vert . hor,
+            \   'row': row,
+            \   'col': col,
+            \   'width': width,
+            \   'height': height,
+            \   'style': 'minimal',
+            \ })
+
+        if a:filetype isnot v:null
+            call nvim_win_set_option(float_win_id, 'filetype', a:filetype)
+        endif
+
+        call nvim_buf_set_option(buf, 'modified', v:false)
+        call nvim_buf_set_option(buf, 'modifiable', v:false)
+
+        " Unlike preview window, :pclose does not close window. Instead, close
+        " hover window automatically when cursor is moved.
+        let call_after_move = printf('<SID>CloseFloatingHoverOnCursorMove(%d, %s)', float_win_id, string(pos))
+        let call_on_bufenter = printf('<SID>CloseFloatingHoverOnBufEnter(%d, %d)', float_win_id, bufnr)
+        augroup nvim_termdebug_close_hover
+            execute 'autocmd CursorMoved,CursorMovedI,InsertEnter <buffer> call ' . call_after_move
+            execute 'autocmd BufEnter * call ' . call_on_bufenter
+        augroup END
+    else
+        echomsg a:lines[0]
+    endif
+endfunction
 
 " Handle an error.
 function! s:HandleError(msg)
