@@ -1385,7 +1385,7 @@ function! neodebug#UpdateLocalsWindow()
     call neodebug#SetBufEnable()
     silent exec '0,' . line("$") . 'd _'
     call neodebug#SetBufDisable()
-    call NeoDebugSendCommand("info locals", 'u')
+    "call NeoDebugSendCommand("info locals", 'u')
 endfunction
 
 function! neodebug#UpdateRegistersWindow()
